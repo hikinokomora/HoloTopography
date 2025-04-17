@@ -24,7 +24,9 @@ public class Engine {
     public Engine(double renderDistance, int particlesPerChunk) {
         this.renderDistance = renderDistance;
         this.particlesPerChunk = particlesPerChunk;
-        this.nmsVersion = Bukkit.getServer().getClass().getPackage().getName().split("\\.")[3];
+        String packageName = Bukkit.getServer().getClass().getPackage().getName();
+        String[] packageParts = packageName.split("\\.");
+        this.nmsVersion = packageParts[packageParts.length - 1];
     }
 
     /**
