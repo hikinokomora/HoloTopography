@@ -1,5 +1,19 @@
 name: HoloTopography
-version: '1.0-SNAPSHOT'
+version: '${version}'
 main: org.krevetka.holoTopography.HoloTopography
-api-version: '1.21'
-authors: [ krevetka ]
+api-version: '1.17'
+authors: [Krevetka]
+description: Плагин для рендеринга топографической карты из частиц
+commands:
+  holotopo:
+    description: Основная команда для управления топографической картой
+    usage: /holotopo [create|stop|help] [размер]
+    permission: holotopo.use
+    aliases: [topo, ht]
+permissions:
+  holotopo.use:
+    description: Позволяет использовать основные функции плагина
+    default: true
+  holotopo.admin:
+    description: Позволяет использовать админ-команды плагина
+    default: op

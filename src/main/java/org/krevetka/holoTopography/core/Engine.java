@@ -2,228 +2,285 @@ package org.krevetka.holoTopography.core;
 
 import org.bukkit.*;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
+import org.krevetka.holoTopography.HoloTopography;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.Random;
 
 /**
  * Главный движок рендеринга 3D-карты
  */
 public class Engine {
     private final Map<UUID, HologramSession> activeSessions = new ConcurrentHashMap<>();
-    private final double renderDistance;
     private final int particlesPerChunk;
-    private final String nmsVersion;
+    private final JavaPlugin plugin;
 
-    public Engine(double renderDistance, int particlesPerChunk) {
-        this.renderDistance = renderDistance;
+    public Engine(double defaultRenderDistance, int particlesPerChunk) {
         this.particlesPerChunk = particlesPerChunk;
-        this.nmsVersion = Bukkit.getServer().getClass().getPackage().getName().split("\\.")[3];
+        this.plugin = JavaPlugin.getPlugin(HoloTopography.class);
     }
 
     /**
      * Инициализация голограммы для игрока
      */
-    public void createSession(Player player, Location center) {
+    public void createSession(Player player, Location center, double renderDistance) {
+        // Остановить текущую сессию, если она есть
+        stopSession(player.getUniqueId());
+        
+        // Создаем новую сессию
+        BukkitTask renderTask = new RenderTask(player.getUniqueId(), center, renderDistance).runTaskTimerAsynchronously(
+                plugin, 0L, plugin.getConfig().getLong("updateInterval", 10L)
+        );
+        
         HologramSession session = new HologramSession(
                 player.getUniqueId(),
                 center,
-                System.currentTimeMillis()
+                System.currentTimeMillis(),
+                renderDistance,
+                renderTask
         );
+        
         activeSessions.put(player.getUniqueId(), session);
-
-        // Запускаем асинхронный рендер-луп
-        new RenderTask(session).runTaskTimerAsynchronously(
-                Bukkit.getPluginManager().getPlugin("HoloTopography"),
-                0L, 2L // Тики между обновлениями
-        );
+    }
+    
+    /**
+     * Остановка сессии для игрока
+     */
+    public boolean stopSession(UUID playerId) {
+        HologramSession session = activeSessions.remove(playerId);
+        if (session != null) {
+            session.task().cancel();
+            return true;
+        }
+        return false;
     }
 
     /**
-     * Основная задача рендеринга
+     * Проверяет, есть ли активная сессия у игрока
+     */
+    public boolean hasActiveSession(UUID playerId) {
+        return activeSessions.containsKey(playerId);
+    }
+
+    /**
+     * Возвращает информацию о сессии игрока
+     */
+    public HologramInfo getSessionInfo(UUID playerId) {
+        HologramSession session = activeSessions.get(playerId);
+        if (session == null) {
+            return null;
+        }
+        return new HologramInfo(
+                session.playerId(),
+                session.center(),
+                session.createdAt(),
+                session.renderDistance()
+        );
+    }
+    
+    /**
+     * Информация о голограмме (для команд и API)
+     */
+    public record HologramInfo(UUID playerId, Location center, long createdAt, double renderDistance) {}
+    
+    /**
+     * Сессия голограммы
+     */
+    public record HologramSession(UUID playerId, Location center, long createdAt, double renderDistance, BukkitTask task) {}
+    
+    /**
+     * Задача рендеринга топографии
      */
     private class RenderTask extends BukkitRunnable {
-        private final HologramSession session;
-        private final Particle.DustOptions dustOptions =
-                new Particle.DustOptions(Color.fromRGB(0x00FF00), 0.8f);
-
-        public RenderTask(HologramSession session) {
-            this.session = session;
+        private final UUID playerId;
+        private final Location center;
+        private final double renderDistance;
+        
+        public RenderTask(UUID playerId, Location center, double renderDistance) {
+            this.playerId = playerId;
+            this.center = center;
+            this.renderDistance = renderDistance;
         }
-
+        
         @Override
         public void run() {
-            Player player = Bukkit.getPlayer(session.playerId());
+            Player player = Bukkit.getPlayer(playerId);
             if (player == null || !player.isOnline()) {
-                cancel();
-                activeSessions.remove(session.playerId());
+                this.cancel();
+                activeSessions.remove(playerId);
                 return;
             }
-
-            // Получаем данные карты
-            TerrainData data = TerrainParser.loadTerrain(
-                    session.center(),
-                    renderDistance,
-                    particlesPerChunk
-            );
-
-            // Рендерим частицы
-            renderParticles(player, data);
-        }
-
-        private void renderParticles(Player player, TerrainData data) {
+            
+            // Получаем текущий мир игрока
             World world = player.getWorld();
-
-            data.vectors().forEach(vector -> {
-                Location loc = session.center().clone().add(vector);
-
-                // Оптимизация: не рендерим то, что игрок не видит
-                if (player.getLocation().distanceSquared(loc) > 256) return;
-
-                // Отправка частиц через Reflection для производительности
-                spawnParticle(player, loc, dustOptions);
-            });
-        }
-
-        private void spawnParticle(Player player, Location loc, Particle.DustOptions options) {
-            try {
-                Object packet = createParticlePacket(
-                        Particle.valueOf("REDSTONE"),
-                        loc.getX(),
-                        loc.getY(),
-                        loc.getZ(),
-                        0, 0, 0,
-                        options.getColor().getRed(),
-                        options.getColor().getGreen(),
-                        options.getColor().getBlue(),
-                        1
-                );
-
-                sendPacket(player, packet);
-            } catch (ReflectiveOperationException e) {
-                e.printStackTrace();
+            
+            // Логируем информацию о мире для диагностики
+            if (plugin.getConfig().getBoolean("debug", false)) {
+                plugin.getLogger().info("Мир: " + world.getName() + 
+                                      ", Мин. высота: " + world.getMinHeight() + 
+                                      ", Макс. высота: " + world.getMaxHeight());
             }
-        }
-    }
-
-    // Рефлексивные методы для низкоуровневого рендеринга
-    private Object createParticlePacket(Particle particle, double x, double y, double z,
-                                        float offsetX, float offsetY, float offsetZ,
-                                        int red, int green, int blue, int count) throws ReflectiveOperationException {
-        Class<?> particleParamClass = getNMSClass("ParticleParam");
-        Class<?> enumParticleClass = getNMSClass("EnumParticle");
-        Class<?> packetPlayOutParticlesClass = getNMSClass("PacketPlayOutWorldParticles");
-        Constructor<?> packetConstructor = packetPlayOutParticlesClass.getConstructor(
-                enumParticleClass,
-                boolean.class,
-                float.class,
-                float.class,
-                float.class,
-                float.class,
-                float.class,
-                float.class,
-                float.class,
-                int.class,
-                int[].class
-        );
-
-        Object nmsParticle = enumParticleClass.getField(particle.name()).get(null);
-        float r = red / 255.0f;
-        float g = green / 255.0f;
-        float b = blue / 255.0f;
-
-        // Для REDSTONE нужно использовать DustOptions
-        if (particle == Particle.valueOf("REDSTONE")) {
-            Class<?> dustOptionsNMS = getNMSClass("ParticleParamRedstone");
-            Constructor<?> dustConstructor = dustOptionsNMS.getConstructor(float.class, float.class, float.class, float.class);
-            Object dust = dustConstructor.newInstance(r, g, b, 1.0f);
-            return packetConstructor.newInstance(dust, false, (float) x, (float) y, (float) z, offsetX, offsetY, offsetZ, 1.0f, count, new int[0]);
-        } else {
-            return packetConstructor.newInstance(nmsParticle, false, (float) x, (float) y, (float) z, offsetX, offsetY, offsetZ, 1.0f, count, new int[0]);
-        }
-    }
-
-    private void sendPacket(Player player, Object packet) throws ReflectiveOperationException {
-        Object handle = getHandle(player);
-        Object playerConnection = getField(handle.getClass(), "playerConnection").get(handle);
-        Method sendPacketMethod = getMethod(playerConnection.getClass(), "sendPacket", getNMSClass("Packet"));
-        sendPacketMethod.invoke(playerConnection, packet);
-    }
-
-    private Class<?> getNMSClass(String name) throws ClassNotFoundException {
-        return Class.forName("net.minecraft.server." + nmsVersion + "." + name);
-    }
-
-    private Object getHandle(Player player) throws ReflectiveOperationException {
-        Method getHandleMethod = player.getClass().getMethod("getHandle");
-        return getHandleMethod.invoke(player);
-    }
-
-    private Field getField(Class<?> clazz, String name) throws NoSuchFieldException {
-        Field field = clazz.getDeclaredField(name);
-        field.setAccessible(true);
-        return field;
-    }
-
-    private Method getMethod(Class<?> clazz, String name, Class<?>... parameterTypes) throws NoSuchMethodException {
-        Method method = clazz.getDeclaredMethod(name, parameterTypes);
-        method.setAccessible(true);
-        return method;
-    }
-
-    /**
-     * Внутренний класс для хранения состояния сессии
-     */
-    private record HologramSession(
-            UUID playerId,
-            Location center,
-            long createdAt
-    ) {}
-
-    /**
-     * DTO для данных рельефа
-     */
-    public static class TerrainData {
-        private final List<Vector> vectors;
-
-        public TerrainData(List<Vector> vectors) {
-            this.vectors = Collections.unmodifiableList(vectors);
-        }
-
-        public List<Vector> vectors() {
-            return vectors;
-        }
-    }
-}
-
-/**
- * Класс для загрузки данных рельефа (пример реализации)
- */
-class TerrainParser {
-    private static final Random random = new Random();
-
-    public static Engine.TerrainData loadTerrain(Location center, double renderDistance, int particlesPerChunk) {
-        List<Vector> vectors = new ArrayList<>();
-        int radius = (int) Math.ceil(renderDistance);
-
-        for (int x = -radius; x <= radius; x++) {
-            for (int z = -radius; z <= radius; z++) {
-                double distance = Math.sqrt(x * x + z * z);
-                if (distance <= renderDistance) {
-                    if (random.nextInt(100) < particlesPerChunk) {
-                        // Пример генерации высоты на основе расстояния и случайности
-                        double y = Math.sin(distance * 0.8) * 3 + (random.nextDouble() - 0.5) * 2;
-                        vectors.add(new Vector(x, y, z));
+            
+            // Определяем границы рендеринга
+            int minX = (int) (center.getBlockX() - renderDistance);
+            int maxX = (int) (center.getBlockX() + renderDistance);
+            int minZ = (int) (center.getBlockZ() - renderDistance);
+            int maxZ = (int) (center.getBlockZ() + renderDistance);
+            
+            // Максимальное расстояние показа частиц
+            double maxParticleDistance = plugin.getConfig().getDouble("particleRenderDistance", 60.0);
+            float particleSize = (float) plugin.getConfig().getDouble("particleSize", 0.8);
+            
+            // Используем значительно меньший шаг для гарантии отображения
+            int step = Math.max(1, (int) (renderDistance / 10)); 
+            
+            // Счетчик для отладки
+            int particleCount = 0;
+            int blocksScanned = 0;
+            
+            // Основной алгоритм сканирования
+            for (int x = minX; x <= maxX; x += step) {
+                for (int z = minZ; z <= maxZ; z += step) {
+                    blocksScanned++;
+                    
+                    // Проверка на нахождение в радиусе
+                    double distanceFromCenter = Math.sqrt(Math.pow(x - center.getBlockX(), 2) + 
+                                                       Math.pow(z - center.getBlockZ(), 2));
+                    if (distanceFromCenter > renderDistance) continue;
+                    
+                    // Ищем блок для отображения
+                    int y;
+                    try {
+                        // Сначала пробуем получить высоту
+                        y = world.getHighestBlockYAt(x, z);
+                        
+                        // Проверка на недопустимую высоту
+                        if (y < 1) {
+                            // Иногда метод getHighestBlockYAt возвращает -1, если чанк не полностью загружен
+                            // В этом случае пробуем использовать фиксированную высоту
+                            y = center.getBlockY();
+                        }
+                    } catch (Exception e) {
+                        // В случае ошибки используем высоту игрока
+                        plugin.getLogger().warning("Ошибка при определении высоты блока: " + e.getMessage());
+                        y = center.getBlockY();
                     }
+                    
+                    // Проверяем расстояние от игрока для оптимизации
+                    Location blockLoc = new Location(world, x, y, z);
+                    double playerDistance = blockLoc.distance(player.getLocation());
+                    
+                    // Увеличиваем дистанцию отображения для большей видимости
+                    if (playerDistance > maxParticleDistance) continue;
+                    
+                    // Расчёт цвета в зависимости от высоты
+                    // Учитываем потенциальные проблемы с определением диапазона высот
+                    double normalizedHeight;
+                    try {
+                        normalizedHeight = (double) (y - world.getMinHeight()) / 
+                                          Math.max(1, world.getMaxHeight() - world.getMinHeight());
+                        
+                        // Защита от некорректных значений
+                        normalizedHeight = Math.max(0, Math.min(1, normalizedHeight));
+                    } catch (Exception e) {
+                        // Если что-то пошло не так, используем значение по умолчанию
+                        normalizedHeight = 0.5;
+                    }
+                    
+                    Color color = getHeightColor(normalizedHeight);
+                    
+                    // Создаем final копии для лямбда-выражения
+                    final int finalX = x;
+                    final int finalY = y;
+                    final int finalZ = z;
+                    final Color finalColor = color;
+                    
+                    // Увеличиваем счетчик частиц
+                    particleCount++;
+                    
+                    // Отображаем частицу синхронно в основном потоке сервера
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        try {
+                            // Первый метод - использовать DUST с настраиваемым цветом
+                            Particle.DustOptions dustOptions = new Particle.DustOptions(finalColor, particleSize);
+                            player.spawnParticle(Particle.DUST_COLOR_TRANSITION, 
+                                                finalX + 0.5, finalY + 1.0, finalZ + 0.5, 
+                                                1, 0, 0, 0, 0, dustOptions);
+                        } catch (Exception e1) {
+                            try {
+                                // Резервный вариант - обычные цветные частицы
+                                player.spawnParticle(Particle.DUST, 
+                                                   finalX + 0.5, finalY + 1.0, finalZ + 0.5, 
+                                                   1, 0, 0, 0, 0);
+                            } catch (Exception e2) {
+                                try {
+                                    // Последняя попытка - использовать гарантированно существующий тип частиц
+                                    player.spawnParticle(Particle.END_ROD, 
+                                                       finalX + 0.5, finalY + 1.0, finalZ + 0.5, 
+                                                       1, 0, 0, 0, 0);
+                                } catch (Exception e3) {
+                                    plugin.getLogger().warning("Все попытки создать частицы провалились: " + e3.getMessage());
+                                }
+                            }
+                        }
+                    });
+                    
+                    // Ограничиваем максимальное количество частиц для производительности
+                    if (particleCount >= 500 && plugin.getConfig().getBoolean("limitParticles", true)) {
+                        break;
+                    }
+                }
+                
+                // Проверка лимита частиц
+                if (particleCount >= 500 && plugin.getConfig().getBoolean("limitParticles", true)) {
+                    break;
+                }
+            }
+            
+            // Отладочные сообщения
+            if (particleCount == 0) {
+                plugin.getLogger().info("Не удалось создать частицы для игрока " + player.getName() + 
+                                       ". Проверено блоков: " + blocksScanned);
+                player.sendActionBar(ChatColor.RED + "Не удалось создать топографическую карту");
+            } else {
+                player.sendActionBar(ChatColor.GREEN + "Топографическая карта: " + particleCount + " точек");
+                if (plugin.getConfig().getBoolean("debug", false)) {
+                    plugin.getLogger().info("Создано " + particleCount + " частиц для игрока " + player.getName() + 
+                                           " из " + blocksScanned + " проверенных блоков");
                 }
             }
         }
-        return new Engine.TerrainData(vectors);
+        
+        /**
+         * Получение цвета для высоты (от синего к красному через градации)
+         */
+        private Color getHeightColor(double normalizedHeight) {
+            // Градиент: синий -> голубой -> зеленый -> желтый -> красный
+            if (normalizedHeight < 0.2) {
+                // Синий -> Голубой
+                double factor = normalizedHeight / 0.2;
+                return Color.fromRGB(0, (int) (factor * 255), 255);
+            } else if (normalizedHeight < 0.4) {
+                // Голубой -> Зеленый
+                double factor = (normalizedHeight - 0.2) / 0.2;
+                return Color.fromRGB(0, 255, 255 - (int) (factor * 255));
+            } else if (normalizedHeight < 0.6) {
+                // Зеленый -> Желтый
+                double factor = (normalizedHeight - 0.4) / 0.2;
+                return Color.fromRGB((int) (factor * 255), 255, 0);
+            } else if (normalizedHeight < 0.8) {
+                // Желтый -> Красный
+                double factor = (normalizedHeight - 0.6) / 0.2;
+                return Color.fromRGB(255, 255 - (int) (factor * 255), 0);
+            } else {
+                // Красный -> Темно-красный
+                double factor = (normalizedHeight - 0.8) / 0.2;
+                return Color.fromRGB(255 - (int) (factor * 128), 0, 0);
+            }
+        }
     }
 }
