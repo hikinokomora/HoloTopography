@@ -30,21 +30,9 @@ public class Engine {
     public void createSession(Player player, Location center, double renderDistance) {
         // Остановить текущую сессию, если она есть
         stopSession(player.getUniqueId());
-        
-        // Создаем новую сессию
-        BukkitTask renderTask = new RenderTask(player.getUniqueId(), center, renderDistance).runTaskTimerAsynchronously(
-                plugin, 0L, plugin.getConfig().getLong("updateInterval", 10L)
-        );
-        
-        HologramSession session = new HologramSession(
-                player.getUniqueId(),
-                center,
-                System.currentTimeMillis(),
-                renderDistance,
-                renderTask
-        );
-        
-        activeSessions.put(player.getUniqueId(), session);
+        Location displayLocation = player.getLocation().add(player.getLocation().getDirection().multiply(3)); // Пример: 5 блоков перед игроком
+        player.sendMessage(ChatColor.YELLOW + "Запущиено Сканирование...");
+        new InitialScanTask(player.getUniqueId(), center, renderDistance, displayLocation).runTaskAsynchronously(plugin);
     }
     
     /**
@@ -52,7 +40,7 @@ public class Engine {
      */
     public boolean stopSession(UUID playerId) {
         HologramSession session = activeSessions.remove(playerId);
-        if (session != null) {
+        if (session != null && session.task() != null) {
             session.task().cancel();
             return true;
         }
@@ -78,7 +66,7 @@ public class Engine {
                 session.playerId(),
                 session.center(),
                 session.createdAt(),
-                session.renderDistance()
+                session.renderDistance() // Возможно, стоит пересмотреть, что возвращать здесь
         );
     }
     
@@ -90,8 +78,141 @@ public class Engine {
     /**
      * Сессия голограммы
      */
-    public record HologramSession(UUID playerId, Location center, long createdAt, double renderDistance, BukkitTask task) {}
-    
+    record HologramSession(UUID playerId, Location center, long createdAt, double renderDistance, BukkitTask task) {}
+
+    private class InitialScanTask extends BukkitRunnable {
+        private final UUID playerId;
+        private final Location center;
+        private final double renderDistance;
+        private final Location displayLocation;
+
+        public InitialScanTask(final UUID playerId, final Location center, final double renderDistance, final Location displayLocation) {
+            this.playerId = playerId;
+            this.center = center;
+            this.renderDistance = renderDistance;
+            this.displayLocation = displayLocation;
+        }
+
+        @Override
+        public void run() {
+            Player player = Bukkit.getPlayer(playerId);
+            if  (player == null || !player.isOnline()) {
+                return;
+            }
+
+            player.sendMessage(ChatColor.YELLOW + "Начало сканирования...");
+            final List<Vector> relativeOffsets = new ArrayList<>();
+            double minWorldX = Double.MAX_VALUE, maxWorldX = Double.MIN_VALUE;
+            double minWorldY = Double.MAX_VALUE, maxWorldY = Double.MIN_VALUE;
+            double minWorldZ = Double.MAX_VALUE, maxWorldZ = Double.MIN_VALUE;
+            final World world = center.getWorld();
+
+            for (int x = (int) -renderDistance; x <= renderDistance; x++) {
+                for (int z = (int) -renderDistance; z <= renderDistance; z++) {
+                    double distance = Math.sqrt(x * x + z * z);
+                    if (distance <= renderDistance) {
+                        int worldY = world.getHighestBlockYAt(center.getBlockX() + x, center.getBlockZ() + z);
+                        Vector offset = new Vector(x, worldY - center.getBlockY(), z);
+                        relativeOffsets.add(offset);
+
+                        minWorldX = Math.min(minWorldX, offset.getX());
+                        maxWorldX = Math.max(maxWorldX, offset.getX());
+                        minWorldY = Math.min(minWorldY, offset.getY());
+                        maxWorldY = Math.max(maxWorldY, offset.getY());
+                        minWorldZ = Math.min(minWorldZ, offset.getZ());
+                        maxWorldZ = Math.max(maxWorldZ, offset.getZ());
+                    }
+                }
+            }
+
+            player.sendMessage(ChatColor.YELLOW + "Сканирование завершено, найдено " + relativeOffsets.size() + " точек.");
+
+            final double finalMinWorldX = minWorldX;
+            final double finalMaxWorldX = maxWorldX;
+            final double finalMinWorldY = minWorldY;
+            final double finalMaxWorldY = maxWorldY;
+            final double finalMinWorldZ = minWorldZ;
+            final double finalMaxWorldZ = maxWorldZ;
+            final List<Vector> finalRelativeOffsets = new ArrayList<>(relativeOffsets);
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                DisplayMapTask displayTask = new DisplayMapTask(playerId, displayLocation, finalRelativeOffsets, finalMinWorldX, finalMaxWorldX, finalMinWorldY, finalMaxWorldY, finalMinWorldZ, finalMaxWorldZ);
+                BukkitTask task = displayTask.runTaskTimer(plugin, 0L, 1L);
+                activeSessions.put(playerId, new HologramSession(playerId, center, System.currentTimeMillis(), renderDistance, task));
+            });
+        }
+    }
+
+    private class DisplayMapTask extends BukkitRunnable {
+        private final UUID playerId;
+        private final Location displayLocation;
+        private final List<Vector> relativeOffsets;
+        private final double minWorldX;
+        private final double maxWorldX;
+        private final double minWorldY;
+        private final double maxWorldY;
+        private final double minWorldZ;
+        private final double maxWorldZ;
+
+        public DisplayMapTask(final UUID playerId, final Location displayLocation, final List<Vector> relativeOffsets,
+                              final double minWorldX, final double maxWorldX, final double minWorldY, final double maxWorldY,
+                              final double minWorldZ, final double maxWorldZ) {
+            this.playerId = playerId;
+            this.displayLocation = displayLocation;
+            this.relativeOffsets = relativeOffsets;
+            this.minWorldX = minWorldX;
+            this.maxWorldX = maxWorldX;
+            this.minWorldY = minWorldY;
+            this.maxWorldY = maxWorldY;
+            this.minWorldZ = minWorldZ;
+            this.maxWorldZ = maxWorldZ;
+        }
+
+        @Override
+        public void run() {
+            final Player player = Bukkit.getPlayer(playerId);
+            if (player == null || !player.isOnline()) {
+                cancel();
+                activeSessions.remove(playerId);
+                return;
+            }
+
+            final Location displayCenter = displayLocation;
+            final double displayWidth = 10;
+            final double displayHeight = 5;
+            final double displayDepth = 10;
+            final World world = player.getWorld();
+            final float particleSize = (float) plugin.getConfig().getDouble("particleSize", 0.8);
+
+            player.sendMessage(ChatColor.YELLOW + "Начало отображения " + relativeOffsets.size() + " частиц...");
+            int particlesSpawned = 0;
+
+            for (final Vector offset : relativeOffsets) {
+                final double normalizedX = (offset.getX() - minWorldX) / (maxWorldX - minWorldX);
+                final double normalizedY = (offset.getY() - minWorldY) / (maxWorldY - minWorldY);
+                final double normalizedZ = (offset.getZ() - minWorldZ) / (maxWorldZ - minWorldZ);
+
+                final double displayX = displayCenter.getX() - displayWidth / 2 + normalizedX * displayWidth;
+                final double displayY = displayCenter.getY() + normalizedY * displayHeight;
+                final double displayZ = displayCenter.getZ() - displayDepth / 2 + normalizedZ * displayDepth;
+
+                final Location particleLocation = new Location(world, displayX, displayY, displayZ);
+
+                // Дополнительная отладка координат
+//                player.sendMessage(ChatColor.GRAY + "Попытка спавна в: " + particleLocation.getX() + ", " + particleLocation.getY() + ", " + particleLocation.getZ());
+
+                try {
+                    player.spawnParticle(Particle.DUST, particleLocation, 1, 0, 0, 0, particleSize, new Particle.DustOptions(Color.GREEN, particleSize));
+                    particlesSpawned++;
+                } catch (Exception e) {
+                    player.sendMessage(ChatColor.RED + "Ошибка спавна частицы: " + e.getMessage());
+                    e.printStackTrace(); // Вывести Stack Trace в консоль
+                }
+            }
+            player.sendMessage(ChatColor.GREEN + "Отображено " + particlesSpawned + " частиц.");
+        }
+    }
+
     /**
      * Задача рендеринга топографии
      */
@@ -99,7 +220,7 @@ public class Engine {
         private final UUID playerId;
         private final Location center;
         private final double renderDistance;
-        
+
         public RenderTask(UUID playerId, Location center, double renderDistance) {
             this.playerId = playerId;
             this.center = center;
