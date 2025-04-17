@@ -46,41 +46,6 @@ public class Engine {
     }
 
     /**
-     * Получить карту активных сессий
-     */
-    public Map<UUID, HologramSession> getActiveSessions() {
-        return activeSessions;
-    }
-
-    /**
-     * Остановка сессии рендеринга для игрока
-     */
-    public void stopSession(Player player) {
-        UUID playerId = player.getUniqueId();
-        HologramSession session = activeSessions.get(playerId);
-        if (session != null) {
-            // Находим и отменяем соответствующую RenderTask
-            Bukkit.getScheduler().getPendingTasks().stream()
-                    .filter(task -> task.getOwner().getName().equals("HoloTopography")) // Фильтруем задачи нашего плагина
-                    .filter(task -> {
-                        try {
-                            java.lang.reflect.Field sessionField = task.getClass().getDeclaredField("session");
-                            sessionField.setAccessible(true);
-                            HologramSession taskSession = (HologramSession) sessionField.get(task);
-                            return taskSession != null && taskSession.playerId().equals(playerId);
-                        } catch (NoSuchFieldException | IllegalAccessException e) {
-                            e.printStackTrace();
-                            return false;
-                        }
-                    })
-                    .findFirst()
-                    .ifPresent(task -> task.cancel());
-
-            activeSessions.remove(playerId);
-        }
-    }
-
-    /**
      * Основная задача рендеринга
      */
     private class RenderTask extends BukkitRunnable {
