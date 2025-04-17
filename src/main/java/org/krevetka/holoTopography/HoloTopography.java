@@ -1,8 +1,10 @@
 package org.krevetka.holoTopography;
 
+import org.bukkit.entity.Player; // Импорт класса Player
 import org.bukkit.plugin.java.JavaPlugin;
-import org.krevetka.holoTopography.commands.HoloTopographyCommand;
+import org.krevetka.holoTopography.commands.HoloTopographyCommand; // Импорт класса HoloTopographyCommand
 import org.krevetka.holoTopography.core.Engine;
+import org.bukkit.Bukkit; // Импорт класса Bukkit
 
 public class HoloTopography extends JavaPlugin {
 
@@ -23,7 +25,14 @@ public class HoloTopography extends JavaPlugin {
     @Override
     public void onDisable() {
         getLogger().info("HoloTopography выключен!");
-        // Здесь можно добавить логику для корректного завершения всех сессий
+        if (engine != null) {
+            engine.getActiveSessions().keySet().forEach(playerId -> {
+                Player player = Bukkit.getPlayer(playerId); // Используем Bukkit.getPlayer(playerId)
+                if (player != null) {
+                    engine.stopSession(player);
+                }
+            });
+        }
     }
 
     public Engine getEngine() {

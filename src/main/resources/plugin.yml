@@ -3,3 +3,13 @@ version: '1.0-SNAPSHOT'
 main: org.krevetka.holoTopography.HoloTopography
 api-version: '1.21'
 authors: [ krevetka ]
+depend: []
+description: Отображает топографическую карту из частиц.
+commands:
+  holotopo:
+    description: Основная команда для работы с голографической топографией.
+    usage: /holotopo <start|stop|reload>
+permissions:
+  holotopography.use:
+    description: Разрешает использование основной команды /holotopo.
+    default: op
