@@ -19,7 +19,7 @@ public class HoloTopography extends JavaPlugin {
         int particlesPerChunk = getConfig().getInt("particlesPerChunk", 15);
         
         // Инициализация движка рендеринга
-        engine = new Engine(defaultRenderDistance, particlesPerChunk);
+        engine = new Engine(getConfig().getDouble("defaultRenderDistance", 20.0), getConfig().getInt("particlesPerChunk", 5));
 
         // Регистрация команд
         getCommand("holotopo").setExecutor(new HoloTopographyCommand(this, engine));
