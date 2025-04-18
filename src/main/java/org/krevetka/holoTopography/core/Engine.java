@@ -29,15 +29,35 @@ public class Engine {
         initializeBlockColors();
     }
 
+    public void startStaticMapUpdate(Player player, UUID playerId, Location initialCenter, double renderDistance, Location displayLocation) {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!player.isOnline() || !hasActiveSession(playerId)) {
+                    cancel();
+                    plugin.getLogger().info("[UPDATE_TIMER] Игрок не в сети или сессия не активна, таймер остановлен.");
+                    return;
+                }
+                plugin.getLogger().info("[UPDATE_TIMER] Запускаем новую InitialScanTask для игрока: " + player.getName());
+                new InitialScanTask(playerId, initialCenter, renderDistance, displayLocation).runTaskAsynchronously(plugin);
+            }
+        }.runTaskTimer(plugin, 0L, 20L); // Обновление каждую секунду (20 тиков)
+    }
+
     /**
      * Инициализация голограммы для игрока
      */
     public void createSession(Player player, Location center, double renderDistance) {
         // Остановить текущую сессию, если она есть
         stopSession(player.getUniqueId());
-        Location displayLocation = player.getLocation().add(player.getLocation().getDirection().multiply(3)); // Пример: 5 блоков перед игроком
-        player.sendMessage(ChatColor.YELLOW + "Запущиено Сканирование...");
+        // Определяем статичное местоположение для отображения
+        Location displayLocation = player.getLocation().add(player.getLocation().getDirection().multiply(5));
+        player.sendMessage(ChatColor.YELLOW + "Запущено первичное сканирование...");
         new InitialScanTask(player.getUniqueId(), center, renderDistance, displayLocation).runTaskAsynchronously(plugin);
+        // Запускаем циклическое обновление карты с небольшой задержкой
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            startStaticMapUpdate(player, player.getUniqueId(), center, renderDistance, displayLocation);
+        }, 5L); // Задержка в 5 тиков
     }
     
     /**
@@ -52,6 +72,9 @@ public class Engine {
         return false;
     }
 
+    /**
+     * Проверяет, есть ли активная сессия у игрока
+     */
     /**
      * Проверяет, есть ли активная сессия у игрока
      */
@@ -195,7 +218,9 @@ public class Engine {
     /**
      * Сессия голограммы
      */
-    record HologramSession(UUID playerId, Location center, long createdAt, double renderDistance, BukkitTask task, BukkitTask updateTask) {}
+    record HologramSession(UUID playerId, Location center, long createdAt, double renderDistance, BukkitTask task, BukkitTask updateTask,
+                           List<Pair<Vector, Material>> initialBlockData,
+                           double minWorldX, double maxWorldX, double minWorldY, double maxWorldY, double minWorldZ, double maxWorldZ) {}
 
     private class InitialScanTask extends BukkitRunnable {
         private final UUID playerId;
@@ -215,6 +240,11 @@ public class Engine {
             Player player = Bukkit.getPlayer(playerId);
             if  (player == null || !player.isOnline()) {
                 return;
+            }
+
+            HologramSession existingSession = activeSessions.get(playerId);
+            if (existingSession != null && existingSession.task() != null) {
+                existingSession.task().cancel(); // Отменяем предыдущую задачу отображения
             }
 
             final List<Pair<Vector, Material>> blockData = new ArrayList<>();
@@ -251,12 +281,11 @@ public class Engine {
             final List<Pair<Vector, Material>> finalBlockData = new ArrayList<>(blockData);
 
             Bukkit.getScheduler().runTask(plugin, () -> {
-                DisplayMapTask displayTask = new DisplayMapTask(playerId, displayLocation, finalBlockData, finalMinWorldX, finalMaxWorldX, finalMinWorldY, finalMaxWorldY, finalMinWorldZ, finalMaxWorldZ); // Исправлено количество аргументов
+                DisplayMapTask displayTask = new DisplayMapTask(playerId, displayLocation, finalBlockData, finalMinWorldX, finalMaxWorldX, finalMinWorldY, finalMaxWorldY, finalMinWorldZ, finalMaxWorldZ);
                 BukkitTask task = displayTask.runTaskTimer(plugin, 0L, 1L);
-                UUID sessionId = UUID.randomUUID();
-                activeSessions.put(playerId, new HologramSession(playerId, center, System.currentTimeMillis(), renderDistance, task, null));
-                Engine engine = JavaPlugin.getPlugin(HoloTopography.class).getEngine(); // Получаем экземпляр Engine
-                engine.startRealtimeUpdate(player, playerId); // Вызываем метод через экземпляр Engine
+                activeSessions.put(playerId, new HologramSession(playerId, center, System.currentTimeMillis(), renderDistance, task, null,
+                        finalBlockData, finalMinWorldX, finalMaxWorldX, finalMinWorldY, finalMaxWorldY, finalMinWorldZ, finalMaxWorldZ));
+                plugin.getLogger().info("[SCAN] Новая карта отображается для игрока: " + player.getName());
             });
         }
     }
@@ -336,41 +365,6 @@ public class Engine {
 //            player.sendMessage(ChatColor.GREEN + "Отображено " + particlesSpawned + " частиц с учетом цвета блоков.");
         }
 
-    }
-
-    public void startRealtimeUpdate(Player player, UUID sessionId) {
-        HologramSession session = activeSessions.get(sessionId);
-        if  (session == null) {
-            player.sendMessage(ChatColor.RED + "У вас нет активной карты.");
-            return;
-        }
-
-        new BukkitRunnable() {
-            private Location lastPlayerLocation = player.getLocation();
-
-            @Override
-            public void run() {
-                if (!player.isOnline() || !activeSessions.containsKey(sessionId)) {
-                    cancel();
-                    return;
-                }
-
-                Location playerLocation = player.getLocation();
-                if (playerLocation.distanceSquared(lastPlayerLocation) > 1) { // Исправлено на playerLocation
-                    Location newDisplayLocation = playerLocation.clone().add(playerLocation.getDirection().multiply(3)); // Исправлено на playerLocation
-                    activeSessions.put(sessionId, new HologramSession(
-                            session.playerId(),
-                            session.center(),
-                            session.createdAt(),
-                            session.renderDistance(),
-                            session.task(),
-                            null
-                    ));
-
-                    lastPlayerLocation = playerLocation; // Исправлено на playerLocation
-                }
-            }
-        }.runTaskTimer(plugin, 20L, 20L);
     }
 
     /**
@@ -472,43 +466,13 @@ public class Engine {
                         normalizedHeight = 0.5;
                     }
                     
-                    Color color = getHeightColor(normalizedHeight);
-                    
                     // Создаем final копии для лямбда-выражения
                     final int finalX = x;
                     final int finalY = y;
                     final int finalZ = z;
-                    final Color finalColor = color;
                     
                     // Увеличиваем счетчик частиц
                     particleCount++;
-                    
-                    // Отображаем частицу синхронно в основном потоке сервера
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        try {
-                            // Первый метод - использовать DUST с настраиваемым цветом
-                            Particle.DustOptions dustOptions = new Particle.DustOptions(finalColor, particleSize);
-                            player.spawnParticle(Particle.DUST_COLOR_TRANSITION, 
-                                                finalX + 0.5, finalY + 1.0, finalZ + 0.5, 
-                                                1, 0, 0, 0, 0, dustOptions);
-                        } catch (Exception e1) {
-                            try {
-                                // Резервный вариант - обычные цветные частицы
-                                player.spawnParticle(Particle.DUST, 
-                                                   finalX + 0.5, finalY + 1.0, finalZ + 0.5, 
-                                                   1, 0, 0, 0, 0);
-                            } catch (Exception e2) {
-                                try {
-                                    // Последняя попытка - использовать гарантированно существующий тип частиц
-                                    player.spawnParticle(Particle.END_ROD, 
-                                                       finalX + 0.5, finalY + 1.0, finalZ + 0.5, 
-                                                       1, 0, 0, 0, 0);
-                                } catch (Exception e3) {
-                                    plugin.getLogger().warning("Все попытки создать частицы провалились: " + e3.getMessage());
-                                }
-                            }
-                        }
-                    });
                     
                     // Ограничиваем максимальное количество частиц для производительности
                     if (particleCount >= 500 && plugin.getConfig().getBoolean("limitParticles", true)) {
@@ -533,34 +497,6 @@ public class Engine {
                     plugin.getLogger().info("Создано " + particleCount + " частиц для игрока " + player.getName() + 
                                            " из " + blocksScanned + " проверенных блоков");
                 }
-            }
-        }
-
-        /**
-         * Получение цвета для высоты (от синего к красному через градации)
-         */
-        private Color getHeightColor(double normalizedHeight) {
-            // Градиент: синий -> голубой -> зеленый -> желтый -> красный
-            if (normalizedHeight < 0.2) {
-                // Синий -> Голубой
-                double factor = normalizedHeight / 0.2;
-                return Color.fromRGB(0, (int) (factor * 255), 255);
-            } else if (normalizedHeight < 0.4) {
-                // Голубой -> Зеленый
-                double factor = (normalizedHeight - 0.2) / 0.2;
-                return Color.fromRGB(0, 255, 255 - (int) (factor * 255));
-            } else if (normalizedHeight < 0.6) {
-                // Зеленый -> Желтый
-                double factor = (normalizedHeight - 0.4) / 0.2;
-                return Color.fromRGB((int) (factor * 255), 255, 0);
-            } else if (normalizedHeight < 0.8) {
-                // Желтый -> Красный
-                double factor = (normalizedHeight - 0.6) / 0.2;
-                return Color.fromRGB(255, 255 - (int) (factor * 255), 0);
-            } else {
-                // Красный -> Темно-красный
-                double factor = (normalizedHeight - 0.8) / 0.2;
-                return Color.fromRGB(255 - (int) (factor * 128), 0, 0);
             }
         }
     }
